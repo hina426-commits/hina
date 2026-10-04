@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<title>大肥鱼的深海猎手 3D</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html,body{height:100%;overflow:hidden;background:#04101f;
+    font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    -webkit-tap-highlight-color:transparent;
+    -webkit-user-select:none;user-select:none;}
+  canvas{display:block;width:100%;height:100%;touch-action:none;}
+  #hud{position:absolute;top:14px;left:18px;right:18px;
+    display:flex;justify-content:space-between;align-items:flex-start;
+    color:#bfe3ff;pointer-events:none;
+    text-shadow:0 2px 10px rgba(0,0,0,.85);z-index:5;}
+  #hud .score{font-size:28px;font-weight:800;color:#eaf6ff;line-height:1;}
+  #hud .best{font-size:11px;opacity:.6;letter-spacing:1px;margin-top:4px;}
+  #hud .wave{font-size:12px;opacity:.75;letter-spacing:2px;margin-top:4px;}
+  #hpWrap{width:150px;height:12px;border-radius:99px;
+    background:rgba(255,255,255,.13);overflow:hidden;
+    border:1px solid rgba(160,210,255,.35);}
+  #hpBar{height:100%;width:100%;border-radius:99px;
+    background:linear-gradient(90deg,#4be0a0,#7fd4ff);
+    transition:width .15s ease, background .3s ease;}
+  #overlay{position:absolute;inset:0;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:12px;padding:24px;
+    text-align:center;
+    background:radial-gradient(circle at 50% 45%,rgba(6,30,55,.78),rgba(2,10,20,.95));
+    backdrop-filter:blur(4px);transition:opacity .25s ease;z-index:10;}
+  #overlay.hidden{opacity:0;pointer-events:none;}
+  #overlay h1{font-size:clamp(22px,6vw,34px);color:#eaf6ff;font-weight:800;
+    letter-spacing:2px;text-shadow:0 0 26px rgba(90,180,255,.7);}
+  #overlay p{color:#9dc4e8;font-size:13.5px;line-height:2;max-width:400px;}
+  #overlay b{color:#ffe066;}
+  #startBtn{margin-top:8px;padding:16px 52px;font-size:17px;font-weight:700;
+    letter-spacing:3px;color:#04121f;font-family:inherit;
+    background:linear-gradient(135deg,#7fd4ff,#4a9de8);
+    border:none;border-radius:999px;cursor:pointer;
+    box-shadow:0 8px 28px rgba(80,180,255,.45);
+    touch-action:manipulation;}
+  #startBtn:active{transform:scale(.95);}
+  #loading{position:absolute;inset:0;display:flex;align-items:center;
+    justify-content:center;color:#9dc4e8;font-size:14px;letter-spacing:2px;
+    background:#04101f;z-index:20;transition:opacity .4s ease;}
+  #loading.hidden{opacity:0;pointer-events:none;}
+</style>
+</head>
+<body><div id="loading">正在潜入深海…</div>
+<div id="hud">
+  <div>
+    <div class="score" id="score">0</div>
+    <div class="best">最高 <span id="best">0</span></div>
+    <div class="wave">深度 <span id="wave">1</span></div>
+  </div>
+  <div><div id="hpWrap"><div id="hpBar"></div></div></div>
+</div>
+<div id="overlay">
+  <h1 id="ovTitle">大肥鱼的深海猎手</h1>
+  <p id="ovDesc">
+    <b>拖动屏幕</b> 控制方向，<b>自动开火</b>。<br>
+    电脑：<b>WASD</b> 移动，<b>鼠标拖动</b>转视角，<b>空格</b>加速。<br>
+    击碎深海怪物，别被撞到。
+  </p>
+  <button id="startBtn">下潜</button>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script>
+(function(){
+'use strict';
+var loadingEl=document.getElementById('loading');
+var scoreEl=document.getElementById('score');
+var bestEl=document.getElementById('best');
+var waveEl=document.getElementById('wave');
+var hpBar=document.getElementById('hpBar');
+var overlay=document.getElementById('overlay');
+var ovTitle=document.getElementById('ovTitle');
+var ovDesc=document.getElementById('ovDesc');
+var startBtn=document.getElementById('startBtn');
+var state={mode:'ready',score:0,best:0,elapsed:0,wave:1,
+  spawnTimer:1.2,difficulty:1};
+try{
+  var b=localStorage.getItem('whale_hunter_best');
+  if(b) state.best=parseInt(b,10)||0;
+}catch(e){}
+bestEl.textContent=state.best;
+var scene, camera, renderer, clock;
+var player, playerGroup;
+var bullets=[], enemies=[], particles=[], stars=[];
+var W=0,H=0;
+var playerState={
+  x:0,y:0,z:0,
+  vx:0,vy:0,
+  angle:0,
+  hp:100,maxHp:100,
+  invuln:0,
+  fireCd:0,
+  boost:0
+};
+var input={
+  keyLeft:false,keyRight:false,keyUp:false,keyDown:false,
+  mouseX:0,mouseY:0,dragging:false,lastX:0,lastY:0
+};function initScene(){
+  scene=new THREE.Scene();
+  scene.background=new THREE.Color(0x04101f);
+  scene.fog=new THREE.FogExp2(0x04101f,0.018);
+  camera=new THREE.PerspectiveCamera(62,window.innerWidth/window.innerHeight,0.1,600);
+  camera.position.set(0,3,-9);
+  renderer=new THREE.WebGLRenderer({antialias:true,powerPreference:'high-performance'});
+  renderer.setSize(window.innerWidth,window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+  renderer.shadowMap.enabled=false;
+  document.body.insertBefore(renderer.domElement, document.body.firstChild);
+  clock=new THREE.Clock();
+  var amb=new THREE.AmbientLight(0x6688bb,1.1);
+  scene.add(amb);
+  var dir=new THREE.DirectionalLight(0xaaddff,1.6);
+  dir.position.set(5,12,-6);
+  scene.add(dir);
+  var back=new THREE.DirectionalLight(0x3366aa,0.9);
+  back.position.set(-6,-4,8);
+  scene.add(back);
+  for(var i=0;i<3;i++){
+    var pl=new THREE.PointLight(0x5599ff,1.2,60);
+    pl.position.set((i-1)*25,14,-20);
+    scene.add(pl);
+  }
+  buildPlayer();
+  buildStars();
+  buildParticlesPool();
+}
+function buildPlayer(){
+  playerGroup=new THREE.Group();
+  var bodyMat=new THREE.MeshPhongMaterial({
+    color:0x4a90d9, shininess:60, specular:0x99ccff
+  });
+  var bellyMat=new THREE.MeshPhongMaterial({
+    color:0xa8d4f0, shininess:40, specular:0xffffff
+  });
+  var darkMat=new THREE.MeshPhongMaterial({
+    color:0x2f6bb5, shininess:70, specular:0x88bbff
+  });
+  var body=new THREE.Mesh(new THREE.SphereGeometry(1.35,24,18),bodyMat);
+  body.scale.set(1.9,1,1);
+  playerGroup.add(body);
+  var belly=new THREE.Mesh(new THREE.SphereGeometry(1.2,20,14),bellyMat);
+  belly.scale.set(1.7,0.78,0.72);
+  belly.position.set(0.15,-0.25,0.15);
+  playerGroup.add(belly);
+  var tailGroup=new THREE.Group();
+  tailGroup.position.set(-2.35,0,0);
+  var tail1=new THREE.Mesh(new THREE.ConeGeometry(0.55,1.5,12),darkMat);
+  tail1.rotation.z=Math.PI/2;
+  tail1.position.x=-0.7;
+  tailGroup.add(tail1);
+  var finGeo=new THREE.ConeGeometry(0.5,1.3,10);
+  var finU=new THREE.Mesh(finGeo,darkMat);
+  finU.rotation.z=-0.5;
+  finU.position.set(-1.4,0.85,0);
+  tailGroup.add(finU);
+  var finD=new THREE.Mesh(finGeo,darkMat);
+  finD.rotation.z=0.5;
+  finD.position.set(-1.4,-0.85,0);
+  tailGroup.add(finD);
+  playerGroup.add(tailGroup);
+  playerGroup.userData.tail=tailGroup;
+  var pecGeo=new THREE.ConeGeometry(0.42,1.1,10);
+  var pecL=new THREE.Mesh(pecGeo,darkMat);
+  pecL.rotation.z=Math.PI*0.6;
+  pecL.rotation.y=0.3;
+  pecL.position.set(0.3,-0.7,-0.95);
+  playerGroup.add(pecL);
+  var pecR=new THREE.Mesh(pecGeo,darkMat);
+  pecR.rotation.z=Math.PI*0.6;
+  pecR.rotation.y=-0.3;
+  pecR.position.set(0.3,-0.7,0.95);
+  playerGroup.add(pecR);
+  var eyeGeo=new THREE.SphereGeometry(0.26,12,10);
+  var eyeMatW=new THREE.MeshPhongMaterial({color:0xffffff,shininess:100});
+  var eyeMatB=new THREE.MeshPhongMaterial({color:0x081a2e,shininess:120});
+  var eL=new THREE.Mesh(eyeGeo,eyeMatW);
+  eL.position.set(1.15,0.35,-0.62);
+  playerGroup.add(eL);
+  var eR=new THREE.Mesh(eyeGeo,eyeMatW);
+  eR.position.set(1.15,0.35,0.62);
+  playerGroup.add(eR);
+  var pL=new THREE.Mesh(new THREE.SphereGeometry(0.13,10,8),eyeMatB);
+  pL.position.set(1.35,0.38,-0.68);
+  playerGroup.add(pL);
+  var pR=new THREE.Mesh(new THREE.SphereGeometry(0.13,10,8),eyeMatB);
+  pR.position.set(1.35,0.38,0.68);
+  playerGroup.add(pR);
+  var mouthMat=new THREE.MeshPhongMaterial({color:0x1a3d66});
+  var mouth=new THREE.Mesh(new THREE.TorusGeometry(0.3,0.08,8,16,Math.PI),mouthMat);
+  mouth.rotation.y=Math.PI/2;
+  mouth.rotation.z=Math.PI;
+  mouth.position.set(1.6,-0.15,0);
+  playerGroup.add(mouth);
+  scene.add(playerGroup);
+  player=playerGroup;
+}
+var bubbleGroup;
+function buildStars(){
+  bubbleGroup=new THREE.Group();
+  var geo=new THREE.SphereGeometry(0.12,6,5);
+  var mat=new THREE.MeshPhongMaterial({
+    color:0x88ccff,transparent:true,opacity:0.35,
+    shininess:100,specular:0xffffff
+  });
+  for(var i=0;i<120;i++){
+    var m=new THREE.Mesh(geo,mat);
+    m.position.set(
+      (Math.random()-0.5)*160,
+      (Math.random()-0.5)*70,
+      (Math.random()-0.5)*220 - 60
+    );
+    m.userData.speed=4+Math.random()*10;
+    bubbleGroup.add(m);
+  }
+  scene.add(bubbleGroup);
+}
+var particlePool=[],particleIndex=0;
+function buildParticlesPool(){
+  var geo=new THREE.SphereGeometry(0.16,6,5);
+  for(var i=0;i<140;i++){
+    var mat=new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:1});
+    var m=new THREE.Mesh(geo,mat);
+    m.visible=false;
+    scene.add(m);
+    particlePool.push({mesh:m,life:0,maxLife:1,vx:0,vy:0,vz:0});
+  }
+}
+function spawnParticle(x,y,z,color,count,spd){
+  count=count||8;spd=spd||10;
+  for(var i=0;i<count;i++){
+    var p=particlePool[particleIndex];
+    particleIndex=(particleIndex+1)%particlePool.length;
+    p.mesh.position.set(x,y,z);
+    p.mesh.material.color.setHex(color);
+    p.mesh.visible=true;
+    p.maxLife=0.5+Math.random()*0.4;
+    p.life=p.maxLife;
+    p.vx=(Math.random()-0.5)*spd;
+    p.vy=(Math.random()-0.5)*spd;
+    p.vz=(Math.random()-0.5)*spd;
+  }
+}function makeEnemy(type){
+  var g=new THREE.Group();
+  var r,hp,color,score;
+  if(type==='jelly'){
+    r=1.1;hp=2;color=0xb98cff;score=10;
+    var cap=new THREE.Mesh(
+      new THREE.SphereGeometry(r,14,10,0,Math.PI*2,0,Math.PI/2),
+      new THREE.MeshPhongMaterial({color:0xb98cff,transparent:true,opacity:0.85,
+        emissive:0x552288,shininess:80})
+    );
+    cap.position.y=-r*0.3;
+    g.add(cap);
+    for(var i=0;i<6;i++){
+      var t=new THREE.Mesh(
+        new THREE.CylinderGeometry(0.06,0.02,1.6,6),
+        new THREE.MeshPhongMaterial({color:0xd0aaff,transparent:true,opacity:0.7})
+      );
+      var a=(i/6)*Math.PI*2;
+      t.position.set(Math.cos(a)*r*0.6,-r*0.9,Math.sin(a)*r*0.6);
+      g.add(t);
+    }
+  }
+  else if(type==='fish'){
+    r=0.9;hp=1;color=0xff8a8a;score=12;
+    var body=new THREE.Mesh(
+      new THREE.SphereGeometry(r,14,10),
+      new THREE.MeshPhongMaterial({color:0xff8a8a,shininess:80})
+    );
+    body.scale.set(1.5,1,1);
+    g.add(body);
+    var tail=new THREE.Mesh(
+      new THREE.ConeGeometry(0.6,1.1,8),
+      new THREE.MeshPhongMaterial({color:0xff6b6b})
+    );
+    tail.rotation.z=-Math.PI/2;
+    tail.position.x=-r*1.8;
+    g.add(tail);
+    var eye=new THREE.Mesh(
+      new THREE.SphereGeometry(0.16,8,6),
+      new THREE.MeshPhongMaterial({color:0x2a0808})
+    );
+    eye.position.set(r*1.1,r*0.25,0.4);
+    g.add(eye);
+  }
+  else if(type==='urchin'){
+    r=1.4;hp=4;color=0x7fa8c9;score=20;
+    var core=new THREE.Mesh(
+      new THREE.SphereGeometry(r*0.7,12,10),
+      new THREE.MeshPhongMaterial({color:0x7fa8c9,shininess:30})
+    );
+    g.add(core);
+    for(var k=0;k<12;k++){
+      var spike=new THREE.Mesh(
+        new THREE.ConeGeometry(0.13,1.2,6),
+        new THREE.MeshPhongMaterial({color:0x9fc4e0})
+      );
+      var phi=Math.acos(1-2*(k+0.5)/12);
+      var theta=Math.PI*(1+Math.sqrt(5))*k;
+      var sx=Math.sin(phi)*Math.cos(theta);
+      var sy=Math.cos(phi);
+      var sz=Math.sin(phi)*Math.sin(theta);
+      spike.position.set(sx*r*0.7,sy*r*0.7,sz*r*0.7);
+      spike.lookAt(sx*2,sy*2,sz*2);
+      spike.rotateX(Math.PI/2);
+      g.add(spike);
+    }
+  }
+  else {
+    r=1;hp=3;color=0x6be0c0;score=18;
+    for(var s=0;s<6;s++){
+      var seg=new THREE.Mesh(
+        new THREE.SphereGeometry(r*(0.55-s*0.05),10,8),
+        new THREE.MeshPhongMaterial({color:0x6be0c0,emissive:0x0a3a30,shininess:90})
+      );
+      seg.position.x=-s*0.75;
+      g.add(seg);
+    }
+    var eelEye=new THREE.Mesh(
+      new THREE.SphereGeometry(0.14,8,6),
+      new THREE.MeshPhongMaterial({color:0x062a22})
+    );
+    eelEye.position.set(0.55,0.25,0.28);
+    g.add(eelEye);
+  }
+  g.userData={r:r,hp:hp,maxHp:hp,type:type,score:score,
+    phase:Math.random()*6.28,hitFlash:0,
+    speed: type==='fish'?11:type==='eel'?8.5:type==='jelly'?5:4};
+  return g;
+}
+function spawnEnemy(){
+  var d=state.difficulty;
+  var pool = d<2 ? ['jelly','fish']
+           : d<4 ? ['jelly','fish','urchin']
+           : ['jelly','fish','urchin','eel'];
+  var t=pool[Math.floor(Math.random()*pool.length)];
+  var m=makeEnemy(t);
+  var angle=Math.random()*Math.PI*2;
+  var dist=45+Math.random()*25;
+  m.position.set(
+    playerState.x+Math.cos(angle)*dist,
+    playerState.y+(Math.random()-0.5)*30,
+    playerState.z+Math.sin(angle)*dist - 20
+  );
+  m.scale.setScalar(0.01);
+  m.userData.spawnScale=1;
+  scene.add(m);
+  enemies.push(m);
+}
+function shoot(){
+  var target=null,bestD=Infinity;
+  for(var i=0;i<enemies.length;i++){
+    var e=enemies[i];
+    var dx=e.position.x-playerState.x;
+    var dy=e.position.y-playerState.y;
+    var dz=e.position.z-playerState.z;
+    var d=dx*dx+dy*dy+dz*dz;
+    if(d<bestD){bestD=d;target=e;}
+  }
+  var angle;
+  if(target){
+    var dx=target.position.x-playerState.x;
+    var dz=target.position.z-playerState.z;
+    var dy=target.position.y-playerState.y;
+    angle=Math.atan2(dz,dx);
+    var dyTarget=Math.atan2(dy,Math.sqrt(dx*dx+dz*dz));
+  } else {
+    angle=playerState.angle;
+    var dyTarget=0;
+  }
+  var spread = state.difficulty>3 ? 0.13 : 0.07;
+  for(var k=-1;k<=1;k++){
+    var a=angle+k*spread;
+    var geo=new THREE.SphereGeometry(0.22,8,6);
+    var mat=new THREE.MeshBasicMaterial({color:0x9fe4ff});
+    var b=new THREE.Mesh(geo,mat);
+    b.position.set(
+      playerState.x+Math.cos(a)*2.2,
+      playerState.y+(dyTarget*2.2),
+      playerState.z+Math.sin(a)*2.2
+    );
+    b.userData={
+      vx:Math.cos(a)*38,
+      vy:dyTarget*38,
+      vz:Math.sin(a)*38,
+      life:1.8
+    };
+    var glow=new THREE.PointLight(0x66ccff,1.2,8);
+    b.add(glow);
+    scene.add(b);
+    bullets.push(b);
+  }
+  spawnParticle(playerState.x+Math.cos(angle)*2.4,
+    playerState.y,playerState.z+Math.sin(angle)*2.4,0x9fe4ff,4,8);
+}
+function startGame(){
+  state.mode='playing';
+  state.score=0;state.elapsed=0;state.wave=1;
+  state.spawnTimer=1.2;state.difficulty=1;
+  for(var i=0;i<enemies.length;i++) scene.remove(enemies[i]);
+  for(i=0;i<bullets.length;i++) scene.remove(bullets[i]);
+  enemies=[];bullets=[];
+  playerState.x=0;playerState.y=0;playerState.z=0;
+  playerState.vx=0;playerState.vy=0;
+  playerState.angle=0;
+  playerState.hp=playerState.maxHp;
+  playerState.invuln=0;playerState.fireCd=0;
+  playerState.boost=0;
+  player.position.set(0,0,0);
+  player.rotation.set(0,0,0);
+  scoreEl.textContent='0';
+  waveEl.textContent='1';
+  updateHpBar();
+  overlay.classList.add('hidden');
+}
+function gameOver(){
+  state.mode='over';
+  var final=Math.floor(state.score);
+  if(final>state.best){
+    state.best=final;
+    try{localStorage.setItem('whale_hunter_best',String(final));}catch(e){}
+  }
+  bestEl.textContent=state.best;
+  spawnParticle(playerState.x,playerState.y,playerState.z,0x7fc9ff,26,26);
+  spawnParticle(playerState.x,playerState.y,playerState.z,0xff9a9a,18,20);
+  ovTitle.textContent='被深海吞没了…';
+  ovDesc.innerHTML='本次得分 <b>'+final+'</b>　历史最高 <b>'+state.best+'</b><br>'+
+    '到达深度 <b>'+state.wave+'</b>，下次潜得更深一点。';
+  startBtn.textContent='再潜一次';
+  overlay.classList.remove('hidden');
+}
+function updateHpBar(){
+  var p=Math.max(0,playerState.hp/playerState.maxHp);
+  hpBar.style.width=(p*100)+'%';
+  hpBar.style.background=p>0.5
+    ?'linear-gradient(90deg,#4be0a0,#7fd4ff)'
+    :(p>0.25
+      ?'linear-gradient(90deg,#ffd166,#ffb347)'
+      :'linear-gradient(90deg,#ff6b6b,#ff9a9a)');
+}
+function update(dt){
+  var t=clock.getElapsedTime();
+  if(bubbleGroup){
+    for(var i=0;i<bubbleGroup.children.length;i++){
+      var bp=bubbleGroup.children[i];
+      bp.position.y+=bp.userData.speed*dt;
+      if(bp.position.y>40){
+        bp.position.y=-40;
+        bp.position.x=(Math.random()-0.5)*160;
+        bp.position.z=(Math.random()-0.5)*220-60;
+      }
+    }
+  }
+  for(i=0;i<particlePool.length;i++){
+    var p=particlePool[i];
+    if(p.life>0){
+      p.life-=dt;
+      p.mesh.position.x+=p.vx*dt;
+      p.mesh.position.y+=p.vy*dt;
+      p.mesh.position.z+=p.vz*dt;
+      p.mesh.material.opacity=p.life/p.maxLife;
+      if(p.life<=0) p.mesh.visible=false;
+    }
+  }
+  if(state.mode==='ready'){
+    player.position.y=Math.sin(t*1.2)*0.6;
+    player.rotation.z=Math.sin(t*1.5)*0.05;
+    player.rotation.y=t*0.3;
+    updateCamera(dt);
+    return;
+  }
+  if(state.mode!=='playing'){ updateCamera(dt); return; }
+  state.elapsed+=dt;
+  state.difficulty=1+state.elapsed/20;
+  var newWave=Math.floor(state.difficulty);
+  if(newWave!==state.wave){
+    state.wave=newWave;
+    waveEl.textContent=state.wave;
+  }
+  var ax=0,az=0;
+  if(input.keyLeft||input.keyA) ax-=1;
+  if(input.keyRight||input.keyD) ax+=1;
+  if(input.keyUp||input.keyW) az-=1;
+  if(input.keyDown||input.keyS) az+=1;
+  var forwardSpeed=10;
+  if(input.boost>0){
+    forwardSpeed=18;
+    input.boost-=dt;
+  }
+  playerState.x+=Math.cos(playerState.angle)*forwardSpeed*dt;
+  playerState.z+=Math.sin(playerState.angle)*forwardSpeed*dt;
+  var strafe=8;
+  playerState.x+=Math.sin(playerState.angle)*ax*strafe*dt*-1;
+  playerState.z+=Math.cos(playerState.angle)*ax*strafe*dt;
+  playerState.y+=az*strafe*dt;
+  playerState.y=Math.max(-14,Math.min(14,playerState.y));
+  player.position.set(playerState.x,playerState.y,playerState.z);
+  player.rotation.y=-playerState.angle;
+  player.rotation.z=ax*0.25;
+  player.rotation.x=az*0.2;
+  if(player.userData.tail){
+    player.userData.tail.rotation.y=Math.sin(t*6)*0.35;
+  }
+  playerState.fireCd-=dt;
+  if(playerState.fireCd<=0){
+    playerState.fireCd=0.14;
+    shoot();
+  }
+  for(i=bullets.length-1;i>=0;i--){
+    var b=bullets[i];
+    b.position.x+=b.userData.vx*dt;
+    b.position.y+=b.userData.vy*dt;
+    b.position.z+=b.userData.vz*dt;
+    b.userData.life-=dt;
+    var alive = b.userData.life>0;
+    if(alive){
+      for(var j=enemies.length-1;j>=0;j--){
+        var e=enemies[j];
+        var dx=b.position.x-e.position.x;
+        var dy=b.position.y-e.position.y;
+        var dz=b.position.z-e.position.z;
+        var rr=(e.userData.r+0.5);
+        if(dx*dx+dy*dy+dz*dz < rr*rr){
+          e.userData.hp--;
+          e.userData.hitFlash=0.12;
+          spawnParticle(b.position.x,b.position.y,b.position.z,0xffee88,6,14);
+          scene.remove(b);
+          bullets.splice(i,1);
+          alive=false;
+          if(e.userData.hp<=0){
+            state.score+=e.userData.score;
+            spawnParticle(e.position.x,e.position.y,e.position.z,0xffaa66,14,22);
+            scene.remove(e);
+            enemies.splice(j,1);
+            scoreEl.textContent=Math.floor(state.score);
+          }
+          break;
+        }
+      }
+    }
+    if(!alive) continue;
+    var distToPlayer=(b.position.x-playerState.x)**2+(b.position.z-playerState.z)**2;
+    if(distToPlayer>4000){
+      scene.remove(b);
+      bullets.splice(i,1);
+    }
+  }
+  state.spawnTimer-=dt;
+  if(state.spawnTimer<=0){
+    spawnEnemy();
+    if(state.difficulty>2.5&&Math.random()<0.35) spawnEnemy();
+    state.spawnTimer=Math.max(0.30,1.2-state.difficulty*0.08);
+  }
+  for(i=enemies.length-1;i>=0;i--){
+    var en=enemies[i];
+    var ex=playerState.x-en.position.x;
+    var ey=playerState.y-en.position.y;
+    var ez=playerState.z-en.position.z;
+    var ed=Math.sqrt(ex*ex+ey*ey+ez*ez)||1;
+    en.position.x+=ex/ed*en.userData.speed*dt;
+    en.position.y+=ey/ed*en.userData.speed*dt;
+    en.position.z+=ez/ed*en.userData.speed*dt;
+    en.userData.phase+=dt*3;
+    if(en.userData.type==='jelly'){
+      en.position.y+=Math.sin(en.userData.phase)*dt*2;
+    }
+    if(en.userData.type==='eel'){
+      en.rotation.y+=dt*3;
+    }
+    if(en.userData.type==='urchin'){
+      en.rotation.y+=dt*1.5;
+    }
+    if(en.userData.hitFlash>0){
+      en.userData.hitFlash-=dt;
+      en.scale.setScalar(1+en.userData.hitFlash*2);
+    } else {
+      en.scale.setScalar(1);
+    }
+    if(en.userData.spawnScale<1){
+      en.userData.spawnScale=Math.min(1,en.userData.spawnScale+dt*3);
+      en.scale.setScalar(en.userData.spawnScale);
+    }
+    var rr=en.userData.r+2.2;
+    if(ed<rr&&playerState.invuln<=0){
+      playerState.hp-=en.userData.type==='urchin'?14:9;
+      playerState.invuln=0.9;
+      spawnParticle(playerState.x,playerState.y,playerState.z,0xff6b6b,14,20);
+      updateHpBar();
+      en.position.x-=ex/ed*6;
+      en.position.y-=ey/ed*6;
+      en.position.z-=ez/ed*6;
+      if(playerState.hp<=0){
+        playerState.hp=0;
+        updateHpBar();
+        gameOver();
+        return;
+      }
+    }
+  }
+  if(playerState.invuln>0) playerState.invuln-=dt;
+  updateCamera(dt);
+}
+var camTarget=new THREE.Vector3();
+var camPos=new THREE.Vector3();
+function updateCamera(dt){
+  var camDist=8;
+  var camHeight=3;
+  var targetX=playerState.x-Math.cos(playerState.angle)*camDist;
+  var targetY=playerState.y+camHeight;
+  var targetZ=playerState.z-Math.sin(playerState.angle)*camDist;
+  camera.position.x+=(targetX-camera.position.x)*Math.min(1,dt*4);
+  camera.position.y+=(targetY-camera.position.y)*Math.min(1,dt*4);
+  camera.position.z+=(targetZ-camera.position.z)*Math.min(1,dt*4);
+  camTarget.set(playerState.x,playerState.y+0.5,playerState.z);
+  camera.lookAt(camTarget);
+  if(playerState.invuln>0&&Math.floor(playerState.invuln*14)%2===0){
+    player.visible=false;
+  } else {
+    player.visible=true;
+  }
+}
+var lastT=0;function animate(){
+  requestAnimationFrame(animate);
+  var dt=Math.min(clock.getDelta(),0.05);
+  update(dt);
+  renderer.render(scene,camera);
+}
+window.addEventListener('keydown',function(e){
+  var k=e.key;
+  if(k==='a'||k==='A'||k==='ArrowLeft'){input.keyLeft=true;}
+  if(k==='d'||k==='D'||k==='ArrowRight'){input.keyRight=true;}
+  if(k==='w'||k==='W'||k==='ArrowUp'){input.keyUp=true;input.keyW=true;}
+  if(k==='s'||k==='S'||k==='ArrowDown'){input.keyDown=true;}
+  if(k===' '){input.boost=0.4;e.preventDefault();}
+  if((k===' '||k==='Enter')&&state.mode!=='playing')startGame();
+});
+window.addEventListener('keyup',function(e){
+  var k=e.key;
+  if(k==='a'||k==='A'||k==='ArrowLeft'){input.keyLeft=false;}
+  if(k==='d'||k==='D'||k==='ArrowRight'){input.keyRight=false;}
+  if(k==='w'||k==='W'||k==='ArrowUp'){input.keyUp=false;input.keyW=false;}
+  if(k==='s'||k==='S'||k==='ArrowDown'){input.keyDown=false;}
+});
+var dragging=false,lastDragX=0;
+renderer.domElement.addEventListener('mousedown',function(e){
+  dragging=true;lastDragX=e.clientX;
+  if(state.mode!=='playing')startGame();
+});
+window.addEventListener('mousemove',function(e){
+  if(dragging){
+    var dx=e.clientX-lastDragX;
+    lastDragX=e.clientX;
+    playerState.angle+=dx*0.005;
+  }
+});
+window.addEventListener('mouseup',function(){dragging=false;});
+renderer.domElement.addEventListener('touchstart',function(e){
+  e.preventDefault();
+  dragging=true;
+  lastDragX=e.touches[0].clientX;
+  if(state.mode!=='playing')startGame();
+},{passive:false});
+renderer.domElement.addEventListener('touchmove',function(e){
+  e.preventDefault();
+  if(dragging&&e.touches[0]){
+    var dx=e.touches[0].clientX-lastDragX;
+    lastDragX=e.touches[0].clientX;
+    playerState.angle+=dx*0.008;
+  }
+},{passive:false});
+renderer.domElement.addEventListener('touchend',function(e){
+  e.preventDefault();
+  dragging=false;
+},{passive:false});
+function fireStart(e){
+  if(e){e.preventDefault();e.stopPropagation();}
+  startGame
